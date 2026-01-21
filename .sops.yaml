@@ -1,0 +1,3 @@
+creation_rules:
+  - path_regex: \.sops(\.|$)
+    age: age1m69ep7lcjgzvdjc49gcaqszmw60u5xj4wfmsd7qcwayh47538shq3wa4xf

@@ -1,0 +1,192 @@
+variant: flatcar
+version: 1.0.0
+
+passwd:
+  users:
+    - name: idan
+      groups: [sudo, docker]
+      shell: /bin/bash
+      ssh_authorized_keys:
+        - "${SSH_AUTHORIZED_KEY}"
+
+storage:
+  disks:
+    - device: /dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_flatcar-state
+      wipe_table: true
+      partitions:
+        - number: 1
+          label: state
+          size_mib: 0
+
+    - device: /dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_flatcar-fast
+      wipe_table: true
+      partitions:
+        - number: 1
+          label: fast
+          size_mib: 0
+
+    - device: /dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_flatcar-slow
+      wipe_table: true
+      partitions:
+        - number: 1
+          label: slow
+          size_mib: 0
+
+  filesystems:
+    - path: /srv
+      device: /dev/disk/by-partlabel/state
+      format: ext4
+      with_mount_unit: true
+
+    - path: /mnt/fast
+      device: /dev/disk/by-partlabel/fast
+      format: ext4
+      with_mount_unit: true
+
+    - path: /mnt/slow
+      device: /dev/disk/by-partlabel/slow
+      format: ext4
+      with_mount_unit: true
+
+  directories:
+    - path: /srv/stacks
+      mode: 0755
+
+    - path: /mnt/fast/docker
+      mode: 0711
+    - path: /var/lib/docker
+      mode: 0711
+
+    - path: /opt/bin
+      mode: 0755
+
+systemd:
+  units:
+    - name: set-timezone.service
+      enabled: true
+      contents: |
+        [Unit]
+        Description=Set timezone to America/Chicago
+        Before=multi-user.target
+
+        [Service]
+        Type=oneshot
+        RemainAfterExit=yes
+        ExecStart=/usr/bin/ln -snf /usr/share/zoneinfo/America/Chicago /etc/localtime
+
+        [Install]
+        WantedBy=multi-user.target
+
+    - name: var-lib-docker.mount
+      enabled: true
+      contents: |
+        [Unit]
+        Description=Bind mount Docker data to fast storage
+        Requires=mnt-fast.mount
+        After=mnt-fast.mount
+
+        [Mount]
+        What=/mnt/fast/docker
+        Where=/var/lib/docker
+        Type=none
+        Options=bind
+
+        [Install]
+        WantedBy=multi-user.target
+
+    - name: docker.service
+      enabled: true
+      dropins:
+        - name: 10-wait-docker-root.conf
+          contents: |
+            [Unit]
+            Requires=var-lib-docker.mount
+            After=var-lib-docker.mount
+
+    - name: install-docker-compose.service
+      enabled: true
+      contents: |
+        [Unit]
+        Description=Install Docker Compose plugin
+        Wants=network-online.target
+        After=network-online.target
+
+        [Service]
+        Type=oneshot
+        RemainAfterExit=yes
+        Environment=DC_VERSION=2.32.4
+        ExecCondition=/bin/bash -c '! test -x /opt/docker/cli-plugins/docker-compose'
+        ExecStart=/bin/bash -euxo pipefail -c '\
+          install -d /opt/docker/cli-plugins /root/.docker/cli-plugins /home/idan/.docker/cli-plugins && \
+          curl -fsSL "https://github.com/docker/compose/releases/download/v$${DC_VERSION}/docker-compose-linux-x86_64" \
+            -o /opt/docker/cli-plugins/docker-compose && \
+          chmod +x /opt/docker/cli-plugins/docker-compose && \
+          ln -sf /opt/docker/cli-plugins/docker-compose /root/.docker/cli-plugins/docker-compose && \
+          ln -sf /opt/docker/cli-plugins/docker-compose /home/idan/.docker/cli-plugins/docker-compose && \
+          chown -R idan:idan /home/idan/.docker \
+        '
+
+        [Install]
+        WantedBy=multi-user.target
+
+    # Install Tailscale
+    - name: install-tailscale.service
+      enabled: true
+      contents: |
+        [Unit]
+        Description=Install Tailscale
+        Wants=network-online.target
+        After=network-online.target
+
+        [Service]
+        Type=oneshot
+        RemainAfterExit=yes
+        Environment=TS_VERSION=1.78.3
+        ExecCondition=/bin/bash -c '! test -x /opt/bin/tailscale'
+        ExecStart=/bin/bash -euxo pipefail -c '\
+          curl -fsSL "https://pkgs.tailscale.com/stable/tailscale_$${TS_VERSION}_amd64.tgz" -o /tmp/tailscale.tgz && \
+          tar -xzf /tmp/tailscale.tgz -C /tmp && \
+          cp /tmp/tailscale_$${TS_VERSION}_amd64/tailscale /opt/bin/ && \
+          cp /tmp/tailscale_$${TS_VERSION}_amd64/tailscaled /opt/bin/ && \
+          chmod +x /opt/bin/tailscale /opt/bin/tailscaled && \
+          rm -rf /tmp/tailscale* \
+        '
+
+        [Install]
+        WantedBy=multi-user.target
+
+    # Tailscale daemon
+    - name: tailscaled.service
+      enabled: true
+      contents: |
+        [Unit]
+        Description=Tailscale Daemon
+        Wants=network-online.target
+        After=network-online.target install-tailscale.service
+        Requires=install-tailscale.service
+
+        [Service]
+        ExecStart=/opt/bin/tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/run/tailscale/tailscaled.sock
+        Restart=on-failure
+        RuntimeDirectory=tailscale
+        StateDirectory=tailscale
+
+        [Install]
+        WantedBy=multi-user.target
+
+    # Tailscale auto-login (runs once to authenticate)
+    - name: tailscale-up.service
+      enabled: true
+      contents: |
+        [Unit]
+        Description=Tailscale Login
+        After=tailscaled.service
+        Requires=tailscaled.service
+
+        [Service]
+        Type=oneshot
+        RemainAfterExit=yes
+        ExecStart=/opt/bin/tailscale up --authkey=${TAILSCALE_AUTH_KEY} --accept-routes
+
+        [Install]
+        WantedBy=multi-user.target
