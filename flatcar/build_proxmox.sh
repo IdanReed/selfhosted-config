@@ -31,7 +31,7 @@ source "$ENV_FILE"
 set +a
 
 echo "Substituting variables..."
-envsubst < "$TEMPLATE_FILE" > "$OUTPUT_FILE"
+envsubst '${SSH_AUTHORIZED_KEY} ${TAILSCALE_AUTH_KEY}' < "$TEMPLATE_FILE" > "$OUTPUT_FILE"
 
 echo "Copying to Proxmox snippets..."
 cp "$OUTPUT_FILE" "$SNIPPETS_DIR/user-data"
